@@ -44,7 +44,7 @@ if(array_key_exists("action", $_REQUEST) && $_REQUEST['action'] == "run") {
         $lookup = buildUserLookup($db, $src, $target, $srcPrefix, $targetPrefix);
 
         if ($doMeta) {
-          importUserMeta($db, $src, $target, $lookup, $srcPrefix, $targetPrefix);
+          importUserMeta($db, $src, $target, $lookup, $srcPrefix, $targetPrefix, $siteId);
         }
 
         if ($doPosts) {

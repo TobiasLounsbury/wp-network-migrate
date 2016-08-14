@@ -3,7 +3,7 @@
 function buildUserLookup($db, $src, $target, $srcPrefix, $targetPrefix) {
   $lookup = array();
 
-  $sql = "SELECT a.ID as old, b.ID AS `new` FROM `{$src}`.`{$srcPrefix}users` a LEFT JOIN `{$target}`.`{$targetPrefix}users` b ON b.user_login = a.user_login WHERE b.ID IS NOT NULL";
+  $sql = "SELECT a.ID as old, b.ID AS `new` FROM `{$src}`.`{$srcPrefix}users` a LEFT JOIN `{$target}`.`{$targetPrefix}users` b ON (b.user_login = a.user_login OR b.user_email = a.user_email) WHERE b.ID IS NOT NULL";
   $res = $db->query($sql);
 
   while ($row = $res->fetch_assoc()) {
@@ -14,6 +14,29 @@ function buildUserLookup($db, $src, $target, $srcPrefix, $targetPrefix) {
 }
 
 function importUsers($db, $src, $target, $srcPrefix, $targetPrefix) {
+
+  //Get all the existing usernames and email addresses to avoid dupes
+  $sql = "SELECT user_login, user_email FROM `{$target}`.`{$targetPrefix}users`";
+  $userNames = $emails = array();
+
+  $res = $db->query($sql);
+  while ($row = $res->fetch_assoc()) {
+    $userNames[] = "'{$row['user_login']}'";
+    $emails[] = "'{$row['user_email']}'";
+  }
+
+  $clauses = array();
+
+  if(!empty($userNames)) {
+    $clauses[] = "`user_login` NOT IN (". implode(", ", $userNames) .")";
+  }
+
+  if(!empty($emails)) {
+    $clauses[] = "`user_email` NOT IN (". implode(", ", $emails) .")";
+  }
+
+  $clauses = (!empty($clauses)) ? "WHERE ". implode(" AND ", $clauses) : "";
+
   $colSQL = "SHOW columns FROM `{$src}`.`{$srcPrefix}users`";
   $res = $db->query($colSQL);
 
@@ -33,7 +56,7 @@ function importUsers($db, $src, $target, $srcPrefix, $targetPrefix) {
   $trgtFieldList = implode(",", $trgtFields);
   $srcFieldList = implode(",", $srcFields);
 
-  $sql = "INSERT INTO `{$target}`.`{$targetPrefix}users` ({$trgtFieldList}) (SELECT {$srcFieldList} FROM `{$src}`.`{$srcPrefix}users`)";
+  $sql = "INSERT INTO `{$target}`.`{$targetPrefix}users` ({$trgtFieldList}) (SELECT {$srcFieldList} FROM `{$src}`.`{$srcPrefix}users` {$clauses} )";
   if($db->query($sql)) {
     echo "<li>Users Imported Successfully</li>";
   } else {
@@ -43,25 +66,70 @@ function importUsers($db, $src, $target, $srcPrefix, $targetPrefix) {
   }
 }
 
-function importUserMeta($db, $src, $target, $lookup, $srcPrefix, $targetPrefix) {
+function importUserMeta($db, $src, $target, $lookup, $srcPrefix, $targetPrefix, $siteId) {
 
+  //Get the current User ID's so we can determine which ones are dupes
+  $sql = "SELECT DISTINCT(user_id) FROM `{$target}`.`{$targetPrefix}usermeta`";
+  $oldMetadataIds = array();
+  $oldUserIds = array();
+  $res = $db->query($sql);
+  while ($row = $res->fetch_assoc()) {
+    $oldMetadataIds[] = $row['user_id'];
+  }
+
+  //Create a temp table so we can work on the data without modifying any perm-data on dry-run
   $createSQL = "CREATE TEMPORARY TABLE `{$target}`.`{$targetPrefix}_wp_migrate_usermeta_temp` LIKE `{$src}`.`{$srcPrefix}usermeta`";
   if (!$db->query($createSQL)) {
     echo "<li>Metadata Error: " . $db->error . "</li>";
   }
 
+  //Import the Data into temp table
   $importSQL = "INSERT `{$target}`.`{$targetPrefix}_wp_migrate_usermeta_temp` SELECT * FROM `{$src}`.`{$srcPrefix}usermeta`";
   if (!$db->query($importSQL)) {
     echo "<li>Error Importing Metadata: " . $db->error . "</li>";
   }
 
+  //Update the User IDs
   foreach($lookup as $old => $new) {
     $sql = "UPDATE `{$target}`.`{$targetPrefix}_wp_migrate_usermeta_temp` SET `user_id` = {$new} WHERE `user_id` = {$old}";
     if(!$db->query($sql)) {
       echo "<li>Error Updating Metadata: ". $db->error. "</li>";
     }
+    if (in_array($new, $oldMetadataIds)) {
+      $oldUserIds[] = $new;
+    }
   }
 
+
+
+
+
+
+  $keys = array("capabilities", "user_level");
+
+  //Remove unneeded metadata for dupe users
+  if (!empty($oldUserIds)) {
+    $keyList = "'wp_". implode("', 'wp_", $keys). "'";
+    $dupeUserList = implode(", ", $oldUserIds);
+    $sql = "DELETE FROM `{$target}`.`{$targetPrefix}_wp_migrate_usermeta_temp` WHERE `user_id` IN ({$dupeUserList}) AND `meta_key` NOT IN ({$keyList})";
+
+    if(!$db->query($sql)) {
+      echo "<li>Error Updating Metadata: ". $db->error. "</li>";
+    }
+  }
+
+  //Update Site membership/capability and roll keys
+  $newUserList = implode(", ", $lookup);
+  foreach($keys as $key) {
+    $sql = "UPDATE `{$target}`.`{$targetPrefix}_wp_migrate_usermeta_temp` SET `meta_key` = 'wp_{$siteId}_{$key}' WHERE  `meta_key` = 'wp_{$key}' AND `user_id` IN ({$newUserList})";
+
+    if(!$db->query($sql)) {
+      echo "<li>Error Updating Metadata: ". $db->error. "</li>";
+    }
+  }
+
+
+  //import modified data into target metadata table.
   $sql = "INSERT INTO `{$target}`.`{$targetPrefix}usermeta` (`user_id`, `meta_key`, `meta_value`) (SELECT `user_id`, `meta_key`, `meta_value` FROM `{$target}`.`{$targetPrefix}_wp_migrate_usermeta_temp`)";
   if(!$db->query($sql)) {
     echo "<li>Error Importing Metadata: ". $db->error. "</li>";
